@@ -119,7 +119,7 @@ Masalah inti **bukan fitur fungsional biasa**, melainkan **menangani lonjakan tr
 | TTL Pembayaran | Batas waktu 10 menit menyelesaikan pembayaran sebelum booking dibatalkan & stok di-release |
 | NIK | Nomor Induk Kependudukan (16 digit), basis pembatasan kuota **1 tiket per NIK per event** (v1.4) |
 | Sesi Pembelian | Satu rangkaian proses pembelian oleh satu customer dalam satu slot akses |
-| Akun / User | Identitas login customer (mis. email + password). Dipakai untuk antrian, booking, dan tujuan e-tiket |
+| Akun / User | Identitas login customer (mis. email + password), **opsional**. Dipakai untuk menyimpan NIK (member) dan riwayat tiket; booking guest tetap dapat dibuat dengan NIK + email |
 | Admin | User dengan peran back-office untuk mengelola katalog event |
 | SSE | Server-Sent Events — kanal push server→klien satu arah, dipakai untuk posisi antrian **dan** stok real-time di Detail Ticket Page |
 
@@ -193,10 +193,10 @@ Masalah inti **bukan fitur fungsional biasa**, melainkan **menangani lonjakan tr
 | FR-11 | Menampilkan detail event beserta kategori tempat (seat category) | MUST |
 | FR-12 | Setiap kategori menampilkan jumlah available dan harga berbeda | MUST |
 | FR-12a | Jumlah available per kategori diperbarui **real-time via SSE** selama customer di Detail Ticket Page, agar stok tidak basi (anti-PHP) | MUST |
-| FR-13 | Maks 3 tiket per **kode booking**, dibatasi **per NIK per event**; **tiap tiket mencatat 1 NIK penonton**. Guest wajib mengisi NIK + email sebelum lanjut | MUST |
-| FR-14 | Menolak jumlah yang melebihi stok, melebihi 3 per booking, atau akumulasi **per NIK**/event > 3 (termasuk booking aktif lain lintas sesi/perangkat) | MUST |
+| FR-13 | Maks 3 tiket per **kode booking**; **tiap tiket mencatat 1 NIK penonton** dan satu NIK maks **1 tiket per event** (BR-01 v1.4). Guest wajib mengisi NIK + email sebelum lanjut | MUST |
+| FR-14 | Menolak jumlah yang melebihi stok, melebihi 3 per booking, atau NIK yang sudah memegang tiket `HELD/PAID` untuk event yang sama (lintas sesi/perangkat) | MUST |
 | FR-15 | Validasi format NIK (16 digit) **+ validasi ke mock Dukcapil**; cegah NIK sama melampaui kuota **1 tiket per event** | MUST |
-| FR-16 | Saat lanjut ke pembayaran, stok di-hold (reservasi sementara) | MUST |
+| FR-16a | Saat submit booking, stok di-hold (reservasi sementara) | MUST |
 | FR-17 | Menampilkan countdown TTL booking (±5 menit) di Detail Ticket Page | MUST |
 | FR-18 | Jika idle melebihi TTL booking: sesi dibatalkan, hold dilepas, slot dilepas untuk antrian berikutnya, customer dinotifikasi & diarahkan keluar | MUST |
 | FR-19 | Timer booking server-authoritative (tak bisa di-bypass klien) & konsisten saat refresh | MUST |
@@ -243,7 +243,7 @@ Masalah inti **bukan fitur fungsional biasa**, melainkan **menangani lonjakan tr
 | BR-04 | Jika TTL Booking habis: sesi batal → hold dilepas → slot diberikan ke antrian berikutnya |
 | BR-05 | TTL Pembayaran = 10 menit sejak booking dibuat |
 | BR-06 | Jika TTL Pembayaran habis: booking batal → stok dilepas → email expired → slot ke antrian berikutnya |
-| BR-07 | **Satu NIK hanya memegang satu antrian/slot aktif per event** (bukan per akun) — mencegah titip banyak order lewat akun berbeda |
+| BR-07 | **Satu NIK hanya memegang satu antrian/slot aktif per event** (bukan per akun) — mencegah titip banyak order lewat akun berbeda. _Implementasi: ditegakkan saat booking (1 tiket per NIK per event), bukan saat join antrian — lihat §11_ |
 | BR-08 | Stok yang sudah dibayar bersifat final; stok yang di-hold tidak dapat dibeli customer lain |
 | BR-09 | **Login OPTIONAL** untuk membeli (seperti KAI); guest mengisi NIK + email saat memilih tiket. Antrian & booking ditautkan ke **NIK** (dan ke `userId` bila login) |
 | BR-10 | Saat seluruh kategori event sold out (available = 0 & tidak ada hold yang bisa kembali jadi tersedia), antrian ditutup: enqueue baru ditolak, customer di antrian dinotifikasi "sold out" dan dikeluarkan |

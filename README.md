@@ -85,7 +85,7 @@ Setiap service: Go, **arsitektur hexagonal** (port & adapter), `net/http` standa
 | Kuota NIK | `pg_advisory_xact_lock` per (event, NIK) + hitung tiket `HELD/PAID` |
 | Token | Login JWT (opsional), Access Token antrian (5 menit), Payment Token (10 menit) — HS256, secret berbeda |
 | Callback | Signature SHA-512 + cek `gross_amount` + tabel idempotensi `order_id:transaction_status` |
-| Email | Kafka → worker, retry topic (5s/10s/20s) → dead-letter topic |
+| Email | Kafka → worker, retry topic (5s/10s/20s) → dead-letter topic (catatan implementasi: [LLD §7](docs/LLD.md#7-batasan-yang-diketahui)) |
 
 Detail: [docs/LLD.md](docs/LLD.md) · skema: [docs/ERD.md](docs/ERD.md) · alur: [docs/SEQUENCE-DIAGRAM.md](docs/SEQUENCE-DIAGRAM.md).
 
@@ -134,7 +134,7 @@ Langkah lengkap, file compose, `.env`, dan perintah uji: **[docs/LOCAL-SETUP.md]
 |---|---|
 | [PRD](docs/PRD.md) | Kebutuhan produk, business rules, catatan implementasi |
 | [HLD](docs/HLD.md) | Arsitektur, komponen, keputusan desain |
-| [LLD](docs/LLD.md) | Struktur kode, Redis keys, skrip Lua, transaksi, kontrak Kafka |
+| [LLD](docs/LLD.md) | Struktur kode, Redis keys, skrip Lua, transaksi, kontrak Kafka, batasan yang diketahui |
 | [ERD](docs/ERD.md) | Skema PostgreSQL |
 | [OpenAPI](docs/openapi.yaml) | Kontrak HTTP (impor ke Apidog/Postman/Swagger UI) |
 | [Sequence diagram](docs/SEQUENCE-DIAGRAM.md) | Alur utama & alternatif |

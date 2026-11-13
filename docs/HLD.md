@@ -82,7 +82,7 @@ flowchart LR
 | Payment | **Midtrans Snap** (sandbox) | Gateway lokal Indonesia; halaman bayar yang sama untuk web & mobile (WebView) |
 | Email | SMTP (Gmail di cloud, Mailpit di lokal) | Dikirim worker secara async |
 
-`dukcapil-mock` sengaja **tidak** dipasang di gateway: ia mensimulasikan pihak eksternal (Dukcapil) dan hanya dipanggil antar service.
+`dukcapil-mock` sengaja **tidak** dipasang di gateway: ia mensimulasikan pihak eksternal (Dukcapil) dan dipanggil antar service. Karena hanya mock, ia tidak memakai autentikasi.
 
 ---
 
@@ -196,7 +196,7 @@ Kafka topic dipartisi per `eventId` (urutan per event terjaga). Email:
 | `payment.succeeded` | **E-tiket** | **ya** |
 | `payment.expired` | Pembatalan / kedaluwarsa | tidak |
 
-Gagal kirim → topic `*.retry` (backoff 5s/10s/20s) → `*.dlt`. Gagal email tidak membatalkan booking.
+Desain: gagal kirim → topic `*.retry` (backoff 5s/10s/20s) → `*.dlt`. Gagal email tidak membatalkan booking. Catatan implementasi retry/DLT dan idempotensi email: [LLD §7](LLD.md#7-batasan-yang-diketahui).
 
 ### 5.9 Sold out
 Saat semua kategori `available = 0` **dan** tidak ada booking `HELD` yang bisa kembali, event ditandai `sold_out` dan `event.sold_out` dipublish.
@@ -212,6 +212,7 @@ Selama masih ada hold yang bisa kedaluwarsa, antrian **tidak** ditutup (stok mas
 - Rate limit: login & register per IP/email, verifikasi NIK per IP/NIK, join antrian per IP.
 - Password bcrypt; refresh token bisa dicabut (denylist Redis); secret lewat Secret Manager, tidak ada di repo.
 - Query SQL selalu parameterized.
+- Daftar batasan keamanan dan keandalan yang diketahui: [LLD §7](LLD.md#7-batasan-yang-diketahui).
 
 ## 7. Observability
 

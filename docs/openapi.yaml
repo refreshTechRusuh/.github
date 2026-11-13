@@ -449,10 +449,21 @@ paths:
                   items:
                   - bookingId: '018f2c1a-0000-7000-8000-0000000000b1'
                     eventName: Konser A
+                    posterUrl: https://example.com/poster-a.jpg
                     status: PAID
+                    paymentMethod: bank_transfer
                     tickets: 2
                     total: 3000000
                     createdAt: '2026-11-01T10:20:00Z'
+                    ticketDetails:
+                    - ticketId: '018f2c1a-0000-7000-8000-0000000000d1'
+                      nik: '3273000000000002'
+                      categoryName: VIP
+                      price: 1500000
+                    - ticketId: '018f2c1a-0000-7000-8000-0000000000d2'
+                      nik: '3273000000000003'
+                      categoryName: VIP
+                      price: 1500000
                   page: 1
                   pageSize: 20
                   total: 5
@@ -862,21 +873,21 @@ paths:
                   paymentExpiresAt: '2026-11-01T10:15:00Z'
           headers: {}
         '400':
-          description: 'Validasi gagal (internal: NIK_INVALID / MAX_3_EXCEEDED / QUOTA_EXCEEDED)'
+          description: 'Validasi gagal (internal: VALIDATION_ERROR / NIK_INVALID, termasuk total tiket > 3 per booking)'
           content:
             application/json:
               schema:
                 "$ref": "#/components/schemas/Envelope"
               example:
-                status: '409'
-                message: NIK sudah mencapai 3 tiket untuk event ini
+                status: '400'
+                message: total tiket maksimal 3 per booking, diterima 4
                 data: {}
           headers: {}
         '401':
           "$ref": "#/components/responses/Unauthorized"
           description: Token tidak ada / tidak sah
         '409':
-          description: 'Stok tidak cukup / kalah race (internal: OUT_OF_STOCK)'
+          description: 'Stok tidak cukup (STOCK_UNAVAILABLE) atau NIK sudah memegang tiket untuk event ini (QUOTA_EXCEEDED; kuota 1 tiket per NIK per event)'
           content:
             application/json:
               schema:
@@ -885,6 +896,13 @@ paths:
                 status: '409'
                 message: Stok tidak mencukupi
                 data: {}
+          headers: {}
+        '410':
+          description: 'Access Token melewati TTL pilih tiket, queue token sudah dicabut (user cancel), atau event sold out (TOKEN_EXPIRED / SOLD_OUT)'
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Envelope"
           headers: {}
       security:
       - accessToken: []
@@ -940,7 +958,7 @@ paths:
     get:
       summary: Detail pembayaran (web & WebView mobile)
       deprecated: false
-      description: 'Detail payment page. `methods[].enabled` dihitung dinamis: false bila `remainingSeconds < estSeconds` (Req 7.5). `snapToken` untuk Midtrans Snap. (FR-21, FR-24, FR-27, Req 8.2)
+      description: 'Detail payment page untuk web & WebView: rincian tiket (NIK dimasking 4 digit awal dan akhir), total, sisa waktu, dan `redirectUrl` Snap (diambil dari Redis bila sudah pernah charge). `snapToken` tidak dikembalikan di sini; ambil dari `POST /charge` (idempoten). Pemilihan metode dilakukan di halaman Snap, tidak ada `methods[]` (FR-27 belum diimplementasikan). (FR-21, FR-24)
 
 '
       operationId: getBookingPayment
@@ -972,23 +990,44 @@ paths:
                     properties:
                       bookingId:
                         type: string
+                      eventName:
+                        type: string
+                      email:
+                        type: string
                       total:
                         type: integer
-                      snapToken:
-                        type: string
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            categoryId:
+                              type: string
+                            categoryName:
+                              type: string
+                            nik:
+                              type: string
+                              description: dimasking, contoh 3273********0002
+                            price:
+                              type: integer
                       redirectUrl:
                         type: string
+                        description: Kosong/tidak ada bila belum pernah charge.
                       remainingSeconds:
                         type: integer
                       status:
                         type: string
+                        enum:
+                        - HELD
+                        - PAID
+                        - EXPIRED
+                        - CANCELLED
+                        description: Status booking.
                       backDisabled:
                         type: boolean
                     required:
                     - bookingId
                     - total
-                    - snapToken
-                    - redirectUrl
                     - remainingSeconds
                     - status
                     - backDisabled
@@ -1001,12 +1040,18 @@ paths:
                 message: OK
                 data:
                   bookingId: cf78760d-9d2e-4589-9007-cfc6f7b628a2
+                  eventName: Konser A
+                  email: user@example.com
                   total: 750000
-                  snapToken: 9a7d6f4e-3b1c-4d2a-8e5f-1234567890ab
-                  redirectUrl: https://app.sandbox.midtrans.com/snap/v2/vtweb/9a7d6f4e-3b1c-4d2a-8e5f-1234567890ab
-                  remainingSeconds: 0
-                  status: PENDING
-                  backDisabled: true
+                  items:
+                  - categoryId: 01a19b65-922c-735c-b5d8-86eaf6bd3656
+                    categoryName: Festival
+                    nik: 3273********0002
+                    price: 750000
+                  redirectUrl: https://app.sandbox.midtrans.com/snap/v4/redirection/66e4fa55
+                  remainingSeconds: 540
+                  status: HELD
+                  backDisabled: false
           headers: {}
         '401':
           "$ref": "#/components/responses/Unauthorized"
@@ -1017,7 +1062,7 @@ paths:
     post:
       summary: Mulai pembayaran via Midtrans
       deprecated: false
-      description: 'Buat transaksi Midtrans (Snap/Core API). Idempoten via `idempotencyKey`. Ditolak bila sisa TTL tak cukup untuk metode (internal METHOD_TIME_INSUFFICIENT, Req 7.6). (FR-24)
+      description: 'Buat transaksi Midtrans Snap (`order_id` = bookingId, expiry Snap = sisa waktu bayar). Idempoten per booking: bila payment `PENDING` sudah ada, dikembalikan apa adanya. Booking yang bukan `HELD` atau sudah lewat batas bayar ditolak 410. (FR-24)
 
 '
       operationId: chargePayment
@@ -1059,29 +1104,19 @@ paths:
                       status: PENDING
                       snapToken: 66e4fa55-fdac-4ef9-91b5-733b97d1b862
                       redirectUrl: https://app.sandbox.midtrans.com/snap/v4/redirection/66e4fa55
-                coreApi:
-                  summary: coreApi
-                  value:
-                    status: '00000'
-                    message: Pembayaran dimulai
-                    data:
-                      paymentId: '018f2c1a-0000-7000-8000-0000000000c1'
-                      status: PENDING
-                      vaNumber: '8808123456789012'
-                      method: bca_va
           headers: {}
         '401':
           "$ref": "#/components/responses/Unauthorized"
           description: Token tidak ada / tidak sah
-        '409':
-          description: Metode tak cukup waktu (internal METHOD_TIME_INSUFFICIENT)
+        '410':
+          description: Booking sudah tidak HELD atau batas bayar lewat (BOOKING_EXPIRED)
           content:
             application/json:
               schema:
                 "$ref": "#/components/schemas/Envelope"
               example:
-                status: '409'
-                message: Sisa waktu tidak cukup untuk metode ini
+                status: '410'
+                message: Booking sudah kedaluwarsa
                 data: {}
           headers: {}
       security:
@@ -1168,12 +1203,28 @@ paths:
           type: string
       responses:
         '200':
-          description: ''
+          description: Booking dibatalkan (atau sudah CANCELLED sebelumnya)
           content:
             application/json:
               schema:
-                type: object
-                properties: {}
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      type: object
+                      properties:
+                        bookingId:
+                          type: string
+                        status:
+                          type: string
+                          example: CANCELLED
+        '403':
+          description: bookingId di Payment Token tidak sama dengan path
+        '409':
+          description: Booking sudah PAID (BOOKING_ALREADY_PAID)
+        '410':
+          description: Booking sudah EXPIRED
           headers: {}
       security:
       - paymentToken: []
@@ -1663,6 +1714,8 @@ components:
                 format: uuid
               eventName:
                 type: string
+              posterUrl:
+                type: string
               status:
                 type: string
                 enum:
@@ -1670,13 +1723,32 @@ components:
                 - PAID
                 - EXPIRED
                 - CANCELLED
+              paymentMethod:
+                type: string
+                description: payment_type Midtrans dari callback; string kosong bila belum bayar.
               tickets:
                 type: integer
+                description: Jumlah tiket (dipertahankan untuk kompatibilitas FE).
               total:
                 type: integer
               createdAt:
                 type: string
                 format: date-time
+              ticketDetails:
+                type: array
+                description: Rincian per tiket (1 tiket = 1 NIK penonton), urut kategori lalu NIK.
+                items:
+                  type: object
+                  properties:
+                    ticketId:
+                      type: string
+                      description: id booking_item = nomor e-tiket
+                    nik:
+                      type: string
+                    categoryName:
+                      type: string
+                    price:
+                      type: integer
         page:
           type: integer
         pageSize:
@@ -1694,8 +1766,11 @@ components:
         status:
           type: string
           enum:
-          - available
+          - on_sale
           - sold_out
+          description: Event `draft` dan `closed` tidak muncul di list publik.
+        posterUrl:
+          type: string
         saleOpensAt:
           type: string
           format: date-time
@@ -1720,6 +1795,20 @@ components:
           format: uuid
         name:
           type: string
+        status:
+          type: string
+          enum:
+          - draft
+          - on_sale
+          - sold_out
+          - closed
+        posterUrl:
+          type: string
+        description:
+          type: string
+        remainingSeconds:
+          type: integer
+          description: Sisa waktu pilih tiket (dari klaim `bookingTtlExpiresAt` Access Token). Token yang sudah lewat TTL ditolak 401/410.
         categories:
           type: array
           items:
@@ -1739,6 +1828,10 @@ components:
           - on_sale
           - sold_out
           - closed
+        posterUrl:
+          type: string
+        description:
+          type: string
         categories:
           type: array
           items:
@@ -1749,6 +1842,10 @@ components:
       - name
       properties:
         name:
+          type: string
+        description:
+          type: string
+        posterUrl:
           type: string
         saleOpensAt:
           type: string
@@ -1763,6 +1860,10 @@ components:
       type: object
       properties:
         name:
+          type: string
+        description:
+          type: string
+        posterUrl:
           type: string
         saleOpensAt:
           type: string
