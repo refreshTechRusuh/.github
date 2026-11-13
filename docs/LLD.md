@@ -127,7 +127,7 @@ func CapByStock(stock, globalCap int) int {
    - Insert `booking` (`HELD`, `payment_expires_at = now + 10m`) dan `booking_item` (harga di-snapshot).
 6. Terbitkan **Payment Token** (HS256, `PAYMENT_TOKEN_SECRET`, `{bookingId, eventId}`, `exp = paymentExpiresAt`).
 7. Simpan queue token di `booking:qt:{bookingId}` (untuk cancel setelah Access Token habis).
-8. Setelah commit (background): `booking.created`, `stock.changed` (reason `HOLD`, angka available aktual), Redis Pub/Sub `stock:{eventId}`.
+8. Publish best-effort di background (goroutine yang dijalankan dari dalam fungsi transaksi, segera setelah hold dan insert): `booking.created`, `stock.changed` (reason `HOLD`, angka available aktual), Redis Pub/Sub `stock:{eventId}`. Gagal publish hanya dicatat di log dan tidak membatalkan booking.
 
 **CancelBooking** (`cancel_booking.go`, `infrastructure/db/booking_repo.go`):
 
@@ -163,11 +163,11 @@ heartbeat tiap 30 detik; frame `soldOut` lalu stream ditutup.
 dan `payment:redirect:{bookingId}` di Redis (TTL = sisa waktu).
 
 **Callback**:
-1. Verifikasi `signature_key = sha512(order_id + status_code + gross_amount + server_key)` (dilewati bila server key kosong — mode lokal).
+1. Verifikasi `signature_key = sha512(order_id + status_code + gross_amount + server_key)`. Key diambil dari `MIDTRANS_SIGNATURE_KEY`, fallback `MIDTRANS_SERVER_KEY`. Bila keduanya kosong, verifikasi dilewati (untuk mode lokal): **di production salah satu key wajib terpasang** (lihat [§7](#7-batasan-yang-diketahui)).
 2. `INSERT payment_callback_log(order_id:transaction_status) ON CONFLICT DO NOTHING` → sudah ada = selesai (idempoten).
 3. Peta status: `settlement` / `capture+accept` → `SUCCESS`; `deny/cancel/failure` → `FAILED`; `expire` → `EXPIRED`; `pending` → `PENDING`.
 4. `gross_amount` harus sama dengan total `price_snapshot`.
-5. Update payment + booking dalam satu transaksi (booking `EXPIRED/CANCELLED` tidak ditimpa).
+5. Update payment + booking dalam satu transaksi (booking `EXPIRED/CANCELLED` tidak ditimpa). Untuk status `FAILED/EXPIRED`, booking ditandai `EXPIRED` dan pada jalur ini stok **tidak** dikembalikan; sweeper hanya memproses booking `HELD` (lihat [§7](#7-batasan-yang-diketahui)).
 6. Bila booking snapshot **bukan `HELD`**: berhenti di sini (tanpa event). `SUCCESS` untuk booking tertutup → log ERROR “needs manual refund (CS)”.
 7. Selain itu: `SUCCESS` → `payment.succeeded` + `slot.released{PAID}`; `FAILED/EXPIRED` → `payment.expired` + `slot.released{PAYMENT_TTL}`.
 
@@ -185,7 +185,7 @@ dan `payment:redirect:{bookingId}` di Redis (TTL = sisa waktu).
 | `DELETE /api/event/v1/admin/delete-event/{eventId}` | JWT admin (soft delete → `closed`) |
 | `POST /api/event/v1/admin/{eventId}/create-category` | JWT admin (`available = capacity`) |
 | `PUT /api/event/v1/admin/update-category/{categoryId}` | JWT admin |
-| `POST /internal/event/v1/{eventId}/sold-out` | internal (dipanggil booking-service) |
+| `POST /internal/event/v1/{eventId}/sold-out` | antar-service, tanpa auth (dipanggil booking-service saat stok habis dan tidak ada hold aktif; tidak dipasang di API Gateway) |
 
 ### 2.5 user-service (:8086) & dukcapil-mock (:8085)
 
@@ -197,7 +197,7 @@ dan `payment:redirect:{bookingId}` di Redis (TTL = sisa waktu).
 | `POST /api/user/v1/nik/verify` | — (rate limit per IP & per NIK; 503 bila Dukcapil mati) |
 | `GET/POST/PUT/DELETE /api/user/v1/member/...` | JWT; data NIK dicocokkan ke Dukcapil (fail-closed) |
 | `GET /api/user/v1/ticket-history` | JWT |
-| `POST /api/dukcapil/v1/verify` (dukcapil-mock) | — (internal) |
+| `POST /api/dukcapil/v1/verify` (dukcapil-mock) | — (mock pihak eksternal; tanpa auth, tidak dipasang di gateway) |
 
 Login JWT (HS256, `USER_JWT_SECRET`): `{sub: userId, role}`; TTL default 1 jam; refresh token terpisah (`REFRESH_TOKEN_SECRET`).
 Akun admin dibuat sekali saat start dari `ADMIN_EMAIL` + `ADMIN_PASSWORD`.
@@ -205,8 +205,9 @@ Dukcapil mencocokkan 4 field tanpa membedakan huruf besar/kecil (`strings.EqualF
 
 ### 2.6 worker-service (:8080, hanya `/healthz`)
 
-Konsumen `booking.created`, `payment.succeeded`, `payment.expired` (+ topic `.retry`). Gagal kirim → publish ke `.retry` dengan backoff 5s/10s/20s;
-setelah 3 kali → `.dlt`. Email e-tiket idempoten per `bookingId`. Template: instruksi bayar, e-tiket (per NIK), pembatalan.
+Konsumen `booking.created`, `payment.succeeded`, `payment.expired` (+ topic `.retry`). Desain: gagal kirim → publish ke `.retry` dengan backoff 5s/10s/20s;
+setelah 3 kali → `.dlt`. Idempotensi email per `bookingId` dijaga di memori proses. Template: instruksi bayar, e-tiket (per NIK), pembatalan.
+Catatan implementasi retry/DLT dan idempotensi ada di [§7](#7-batasan-yang-diketahui).
 
 ---
 
@@ -217,14 +218,14 @@ Key pesan = `eventId` (partisi per event → urutan terjaga per event).
 | Topic | Producer | Consumer | Payload |
 |---|---|---|---|
 | `booking.created` | booking | worker | `{bookingId, eventId, eventName, email, items[{categoryId, categoryName, nik, name, price}], totalAmount, paymentExpiresAt}` |
-| `stock.changed` | booking | queue | `{eventId, categoryId, delta, available, reason: HOLD\|RELEASE\|PAID}` |
+| `stock.changed` | booking | queue | `{eventId, categoryId, delta, available, reason: HOLD\|RELEASE}` |
 | `slot.released` | booking, payment | queue | `{bookingId, eventId, reason: PAID\|BOOKING_TTL\|PAYMENT_TTL\|CANCELLED, queueToken?}` |
-| `payment.succeeded` | payment | worker | `{bookingId, eventId, eventName, email, items[...]}` |
-| `payment.expired` | payment | worker | `{paymentId?, bookingId, eventId, eventName?, email?}` |
+| `payment.succeeded` | payment | worker | `{bookingId, eventId, eventName, email, items[{categoryId, categoryName, nik, price}]}` (`paymentId`, `method`, nama penonton, dan `ticketCode` tidak diisi; worker memakai fallback `TKT-n`) |
+| `payment.expired` | payment | worker | Dari callback: `{bookingId, eventId, eventName, email}`. Dari sweeper payment: hanya `{bookingId, eventId}` (+ `paymentId`), sehingga worker tidak mengirim email |
 | `event.sold_out` | booking, payment, event | queue | `{eventId}` |
 | `*.retry`, `*.dlt` | worker | worker / manual | pesan asli + header `X-Retry-Count` |
 
-Semua publish dilakukan **setelah commit** dan bersifat best-effort: gagal publish dicatat di log, tidak membatalkan transaksi.
+Publish bersifat **best-effort**: dijalankan di background setelah operasi DB, gagal publish dicatat di log dan tidak membatalkan transaksi. Pada `POST /create` goroutine publish dimulai dari dalam fungsi transaksi, sesaat sebelum commit.
 
 ---
 
@@ -271,7 +272,7 @@ Payment: `PENDING → SUCCESS | FAILED | EXPIRED` (cancel mengubah `PENDING → 
 | `QUEUE_SSE_TICK_SECONDS` | queue | 2 | Interval cek ulang + heartbeat SSE |
 | `QUEUE_SWEEP_INTERVAL_MS` | queue | 1000 | Interval sweeper kursi |
 | `QUEUE_JOIN_RATE_PER_MIN` | queue | 30 | Rate limit join per IP (0 = mati) |
-| `DUKCAPIL_FAIL_OPEN` | booking | true | `false` = NIK wajib cocok |
+| `DUKCAPIL_FAIL_OPEN` | booking | true | `false` = NIK wajib cocok. Deploy Cloud Run saat ini memakai `true` |
 | `MIDTRANS_SERVER_KEY`, `MIDTRANS_ENV` | payment, booking | —, sandbox | Booking memakainya untuk expire saat cancel |
 | `OTEL_ENABLED`, `OTEL_SAMPLE_RATIO` | semua | true | Matikan di lokal |
 
@@ -284,3 +285,28 @@ Daftar lengkap per service beserta contoh nilai lokal: [LOCAL-SETUP.md §4](LOCA
 - Unit test co-located (`*_test.go`), table-driven, mock lewat port (gomock / fake); Redis diuji dengan miniredis, SQL dengan pgxmock / fake querier.
 - Test kritikal: anti-oversell konkuren, kuota NIK, ekspirasi TTL, idempotensi callback, promosi FCFS, kesetaraan rumus kapasitas Go vs Lua, cancel.
 - CI tiap PR: `go test -race` + coverage gate, golangci-lint (termasuk `depguard` untuk aturan layer), gosec, govulncheck.
+
+---
+
+## 7. Batasan yang diketahui
+
+Hal-hal berikut ditemukan saat audit kode (13 November 2026) dan **belum diubah** demi menjaga alur yang sudah berjalan menjelang deadline.
+Dicatat di sini agar dokumentasi sesuai perilaku kode.
+
+| Area | Perilaku saat ini | Dampak / langkah lanjut |
+|---|---|---|
+| Signature callback | Verifikasi dilewati bila `MIDTRANS_SIGNATURE_KEY` dan `MIDTRANS_SERVER_KEY` kosong. Tidak ada guard `APP_ENV` | Pastikan secret terpasang di Cloud Run. Lanjutan: gagal start / tolak callback bila key kosong di production |
+| Idempotensi callback | Key `order_id:transaction_status` ditulis sebelum snapshot, cek `gross_amount`, dan update status | Bila langkah sesudahnya gagal, retry Midtrans dianggap sudah diproses. Lanjutan: satu transaksi dengan update status |
+| Callback `FAILED/EXPIRED` | Booking ditandai `EXPIRED` tanpa mengembalikan stok; sweeper hanya memproses `HELD` | Stok bisa tertahan. Lanjutan: kembalikan stok di transaksi yang sama |
+| Kategori vs event | `HoldStock` tidak memeriksa bahwa `categoryId` milik `eventId` pada token | Lanjutan: tambah `event_id` pada UPDATE dan tolak kategori di luar event |
+| Retry / DLT worker | Producer tidak meneruskan header `X-Retry-Count`/`X-Error`, sehingga hitungan retry tidak naik. Retry ditunda lewat goroutine | Pesan yang gagal terus dicoba ulang di `*.retry`, tidak sampai `*.dlt`. Lanjutan: `Publish` dengan header, commit offset setelah hand-off |
+| Idempotensi email | Penanda terkirim disimpan di memori dan ditandai sebelum `Send` | Hilang saat restart, tidak dibagi antar instance, dan email yang gagal tidak dicoba ulang. Lanjutan: Redis `SET NX` / tabel log, tandai setelah sukses |
+| Isi e-tiket | `payment.succeeded` tanpa nama penonton dan `ticketCode`. QR berupa URL `api.qrserver.com` berisi `bookingId:ticketCode` | Nama kosong, kode `TKT-n`. Lanjutan: simpan nama dan kode di `booking_item`, generate QR sendiri |
+| Access Token | Tidak dikonsumsi sekali pakai dan tidak memuat NIK | Dalam 5 menit satu token dapat membuat lebih dari satu booking. Dibatasi kuota NIK dan stok |
+| Antrian per NIK | Join antrian tanpa NIK (lihat PRD §11) | `QUEUE_CAP` dan rate limit per IP adalah lapis pelindung |
+| Rate limit per IP | Memakai nilai pertama `X-Forwarded-For` | Dapat dipalsukan; limit per email dan per NIK tetap berlaku |
+| Endpoint antar-service | `POST /internal/event/v1/{eventId}/sold-out` tanpa auth dan tidak memeriksa stok | Tidak ada di gateway; hanya terjangkau lewat URL Cloud Run langsung |
+| JWT | Parser menerima keluarga HS256/384/512 dan tidak mewajibkan `exp`/`iss`. Default secret hanya ditolak bila `APP_ENV=production` | Secret production diinjeksi dari Secret Manager |
+| Log payload Midtrans | Respons Snap (termasuk `token`, `redirect_url`) dan email dicatat di level INFO | Batasi akses Cloud Logging |
+| Transport data | `DB_SSL_MODE=disable`, Redis dan Kafka tanpa TLS di VPC privat | Terlindung VPC connector tanpa IP publik |
+| Observability | Dashboard Prometheus/Grafana belum ada (PRD NFR-09) | Log terstruktur dan trace tersedia |
