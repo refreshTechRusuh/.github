@@ -1,0 +1,2044 @@
+---
+openapi: 3.0.1
+info:
+  title: Rusuh Booking Tiket — Backend API
+  description: |
+    Kontrak API backend untuk sistem booking tiket konser (flash crowd). Endpoint dikelompokkan **per halaman / journey** (tags) agar mudah dinavigasi saat diimpor ke Apidog/Postman: Login, Member/NIK, Home, Waiting Room, Detail Ticket, Payment, Admin, dan service internal (Dukcapil mock).
+
+    ## Standar Response (envelope)
+    Semua response (sukses & gagal) memakai **satu envelope** dari `pkg/apinizer`:
+    ```
+    { "status": "00000" | "<kode HTTP>", "message": "...", "data": { ... }, "partial": false }
+    ```
+    - Sukses: `status="00000"`, HTTP 200, `data` = payload.
+    - Gagal: `status` = string kode HTTP ("400","401",...), `data = {}`,
+      `message` generik. Kode error domain (`apperror.AppError.ErrorCode`)
+      dipakai internal untuk memilih status + message; **tidak** jadi field body.
+
+    - **Transaction ID** dibawa di **response header** (`X-Transaction-Id`), bukan body.
+
+    Di spec ini envelope direpresentasikan eksplisit: tiap response `allOf` [`Envelope`] + `data` yang di-`$ref` ke payload spesifik (gaya A).
+
+    ## Auth (login OPTIONAL — pola KAI)
+    - `Authorization: Bearer <authToken>` — JWT login. **Opsional** untuk journey
+      beli (guest boleh tanpa); **wajib** untuk member/NIK, riwayat, & admin.
+
+    - `X-Access-Token: <accessToken>` — token antrian; wajib untuk Detail/Booking/Payment.
+    - Guest: identitas pembeli = **data penonton (nik+nama+tglLahir+namaIbu, dicocokkan Dukcapil) + email** + Access Token.
+
+    ## Realtime
+    - **SSE** (Server-Sent Events) untuk **posisi antrian** dan **stok** (seragam,
+      satu arah server→klien). Didokumentasikan sebagai handshake GET `text/event-stream`.
+
+    Semua timestamp ISO-8601 UTC.
+
+    ## Base URL
+    - Production: `https://rusuh-gateway-stream-381331776726.asia-northeast1.gateway.dev` (wajib `https://`; tanpa skema → redirect 302 lalu klien mengirim ulang sebagai GET → 405).
+    - Lokal: tiap service punya port sendiri (lihat `docs/LOCAL-SETUP.md`).
+  version: 1.4.0
+  contact:
+    name: Tim Backend — Rusuh Booking Tiket
+tags:
+- name: Login Page
+- name: Member/NIK
+- name: Riwayat
+- name: Home Page
+- name: Waiting Room
+- name: Detail Ticket Page
+- name: Payment Page
+- name: Admin Page
+- name: Internal
+paths:
+  "/auth/register":
+    post:
+      summary: Register akun customer
+      deprecated: false
+      description: Daftar akun customer baru. Publik. (FR-A1)
+      operationId: register
+      tags:
+      - Login Page
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/RegisterRequest"
+            example:
+              email: user@example.com
+              password: password123
+              name: Surya
+        required: true
+      responses:
+        '200':
+          description: Akun berhasil dibuat
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/RegisterResponse"
+              example:
+                status: '00000'
+                message: Akun dibuat
+                data:
+                  userId: '018f2c1a-0000-7000-8000-000000000001'
+                  email: user@mail.com
+                  role: customer
+          headers: {}
+        '400':
+          "$ref": "#/components/responses/BadRequest"
+          description: Request tidak valid
+        '409':
+          "$ref": "#/components/responses/Conflict"
+          description: Konflik (mis. EMAIL_TAKEN)
+      security: []
+  "/auth/login":
+    post:
+      summary: Login customer/admin
+      deprecated: false
+      description: Login dan terbitkan JWT. Publik. (FR-A2, FR-A5)
+      operationId: login
+      tags:
+      - Login Page
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/LoginRequest"
+            example:
+              email: user@example.com
+              password: password123
+        required: true
+      responses:
+        '200':
+          description: Login sukses
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/LoginResponse"
+              example:
+                status: '00000'
+                message: Login sukses
+                data:
+                  authToken: eyJhbGciOi...
+                  refreshToken: eyJhbGciOi...
+                  role: customer
+                  expiresIn: 3600
+          headers: {}
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+          description: Token tidak ada / tidak sah
+      security: []
+  "/auth/logout":
+    post:
+      summary: Logout (revoke refresh token)
+      deprecated: false
+      description: Akhiri sesi, cabut refresh token. Idempoten. Butuh userJWT. (FR-A8, Req 20)
+      operationId: logout
+      tags:
+      - Login Page
+      parameters: []
+      responses:
+        '200':
+          description: Logout sukses
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      type: object
+                      properties:
+                        ok:
+                          type: boolean
+                          example: true
+              example:
+                status: '00000'
+                message: Logout sukses
+                data:
+                  ok: true
+          headers: {}
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+          description: Token tidak ada / tidak sah
+      security:
+      - userJWT: []
+  "/auth/me":
+    get:
+      summary: Profil user dari token
+      deprecated: false
+      description: Identitas user berdasarkan JWT. Butuh userJWT. (FR-A4)
+      operationId: getMe
+      tags:
+      - Login Page
+      parameters: []
+      responses:
+        '200':
+          description: Profil user
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/MeResponse"
+              example:
+                status: '00000'
+                message: OK
+                data:
+                  userId: '018f2c1a-0000-7000-8000-000000000001'
+                  email: user@mail.com
+                  role: customer
+          headers: {}
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+          description: Token tidak ada / tidak sah
+      security:
+      - userJWT: []
+  "/api/user/v1/member/list":
+    get:
+      summary: Daftar NIK milik user
+      deprecated: false
+      description: Daftar member/NIK user login. Butuh userJWT. (FR-A6, Req 16)
+      operationId: listMembers
+      tags:
+      - Member/NIK
+      parameters: []
+      responses:
+        '200':
+          description: Daftar member
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  message:
+                    type: string
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            memberId:
+                              type: string
+                            nik:
+                              type: string
+                            nama:
+                              type: string
+                            tglLahir:
+                              type: string
+                            namaIbu:
+                              type: string
+                    required:
+                    - items
+                required:
+                - status
+                - message
+                - data
+              example:
+                status: '00000'
+                message: OK
+                data:
+                  items:
+                  - memberId: m1
+                    nik: '3273000000000001'
+                    nama: Budi
+                    tglLahir: '1997-02-02'
+                    namaIbu: erna
+          headers: {}
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+          description: Token tidak ada / tidak sah
+      security:
+      - userJWT: []
+  "/api/user/v1/member/create":
+    post:
+      summary: Tambah NIK (dicocokkan ke Dukcapil)
+      deprecated: false
+      description: 'Simpan NIK milik user. Field `{nik, nama, tglLahir, namaIbu}` dicocokkan ke mock Dukcapil; gagal cocok → ditolak. Tanpa OTP. Butuh userJWT. (Req 16, 17)
+
+'
+      operationId: createMember
+      tags:
+      - Member/NIK
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/MemberRequest"
+            example:
+              nik: '3273000000000002'
+              nama: Ani Lestari
+              tglLahir: '1992-05-17'
+              namaIbu: Rina Marlina
+        required: true
+      responses:
+        '200':
+          description: Member tersimpan
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/Member"
+              example:
+                status: '00000'
+                message: Member tersimpan
+                data:
+                  memberId: m1
+                  nik: '3273000000000001'
+                  nama: Budi
+          headers: {}
+        '400':
+          "$ref": "#/components/responses/BadRequest"
+          description: Request tidak valid
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+          description: Token tidak ada / tidak sah
+      security:
+      - userJWT: []
+  "/api/user/v1/member/update/{id}":
+    put:
+      summary: Ubah member
+      deprecated: false
+      description: Ubah data member; dicocokkan ulang ke Dukcapil. Butuh userJWT. (Req 16)
+      operationId: updateMember
+      tags:
+      - Member/NIK
+      parameters:
+      - name: id
+        in: path
+        description: ID resource
+        required: true
+        example: ''
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/MemberRequest"
+            example:
+              nik: pariatur in Lorem laboris tempor
+              nama: veniam elit consequat fugiat ex
+              tglLahir: '2018-02-19'
+              namaIbu: ullamco pariatur sunt ea
+        required: true
+      responses:
+        '200':
+          description: Member diperbarui
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/Member"
+          headers: {}
+        '400':
+          "$ref": "#/components/responses/BadRequest"
+          description: Request tidak valid
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+          description: Token tidak ada / tidak sah
+      security:
+      - userJWT: []
+  "/api/user/v1/member/delete/{id}":
+    delete:
+      summary: Hapus member
+      deprecated: false
+      description: ''
+      operationId: deleteMember
+      tags:
+      - Member/NIK
+      parameters:
+      - name: id
+        in: path
+        description: ID resource
+        required: true
+        example: fd1f681d-86d1-4ad4-90db-e1a012f03e5e
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Member dihapus
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      type: object
+                      properties:
+                        ok:
+                          type: boolean
+                          example: true
+          headers: {}
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+          description: Token tidak ada / tidak sah
+      security:
+      - userJWT: []
+  "/api/user/v1/ticket-history":
+    get:
+      summary: Riwayat tiket user
+      deprecated: false
+      description: Daftar booking milik user login (paginasi). Booking guest tidak muncul. Butuh userJWT. (FR-A9, Req 21)
+      operationId: getTicketHistory
+      tags:
+      - Riwayat
+      parameters:
+      - name: page
+        in: query
+        description: ''
+        required: false
+        example: 1
+        schema:
+          type: integer
+          default: 1
+      - name: pageSize
+        in: query
+        description: ''
+        required: false
+        example: 10
+        schema:
+          type: integer
+          default: 20
+      responses:
+        '200':
+          description: Riwayat booking
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/TicketHistory"
+              example:
+                status: '00000'
+                message: OK
+                data:
+                  items:
+                  - bookingId: '018f2c1a-0000-7000-8000-0000000000b1'
+                    eventName: Konser A
+                    status: PAID
+                    tickets: 2
+                    total: 3000000
+                    createdAt: '2026-11-01T10:20:00Z'
+                  page: 1
+                  pageSize: 20
+                  total: 5
+          headers: {}
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+          description: Token tidak ada / tidak sah
+      security:
+      - userJWT: []
+  "/api/event/v1/list":
+    get:
+      summary: Daftar event + status
+      deprecated: false
+      description: Daftar event + status (available/sold_out). Publik. (FR-01..03)
+      operationId: listEvents
+      tags:
+      - Home Page
+      parameters:
+      - name: page
+        in: query
+        description: Halaman (1-based). Default 1.
+        required: false
+        example: 1
+        schema:
+          type: integer
+          minimum: 1
+          default: 1
+      - name: size
+        in: query
+        description: Jumlah item per halaman. Default 10, di-clamp maksimal 100.
+        required: false
+        example: 10
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 10
+      responses:
+        '200':
+          description: Daftar event
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      type: array
+                      items:
+                        "$ref": "#/components/schemas/EventListItem"
+                    meta:
+                      "$ref": "#/components/schemas/PageMeta"
+              example:
+                status: '00000'
+                message: OK
+                data:
+                - id: '018f2c1a-0000-7000-8000-0000000000a1'
+                  name: Konser A
+                  status: available
+                  saleOpensAt: '2026-12-01T10:00:00Z'
+                - id: '018f2c1a-0000-7000-8000-0000000000a2'
+                  name: Konser B
+                  status: sold_out
+                  saleOpensAt: '2026-11-20T10:00:00Z'
+                meta:
+                  page: 1
+                  size: 10
+                  totalItems: 42
+                  totalPages: 5
+          headers: {}
+      security: []
+  "/api/queue/v1/event/{eventId}/join":
+    post:
+      summary: Masuk antrian / minta akses
+      deprecated: false
+      description: 'Minta akses event. Jika booking room penuh → masuk antrian (QUEUED); jika ada slot → langsung ADMITTED + Access Token. userJWT **opsional** (guest boleh antre); `queueToken` ditautkan ke NIK begitu diketahui (1 NIK = 1 antrian/event). (FR-04, FR-05, FR-A3, Req 2, 22, 23)
+
+'
+      operationId: enqueue
+      tags:
+      - Waiting Room
+      parameters:
+      - name: eventId
+        in: path
+        description: ID event (UUID)
+        required: true
+        example: '018f2c1a-0000-7000-8000-0000000000a1'
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Masuk antrian atau langsung admitted
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/QueueEnqueueResponse"
+              examples:
+                admitted:
+                  summary: Langsung dapat akses (ada slot booking room)
+                  value:
+                    status: '00000'
+                    message: Admitted
+                    data:
+                      status: ADMITTED
+                      queueToken: q_abc
+                      accessToken: acc_xyz
+                      bookingExpiresAt: '2026-11-01T10:05:00Z'
+                queued:
+                  summary: Masuk antrian
+                  value:
+                    status: '00000'
+                    message: Queued
+                    data:
+                      status: QUEUED
+                      queueToken: q_abc
+                      position: 1423
+                      etaSeconds: 420
+          headers: {}
+        '410':
+          description: Event sold out, antrian ditutup (internal SOLD_OUT) (BR-10, FR-10b)
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Envelope"
+              example:
+                status: '410'
+                message: Tiket sudah habis
+                data: {}
+          headers: {}
+        '503':
+          description: Antrian penuh (internal QUEUE_FULL) — ramai, coba lagi (Req 22, FR-10c)
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Envelope"
+              example:
+                status: '503'
+                message: Antrian sedang penuh
+                coba lagi sebentar: 
+                data: {}
+          headers: {}
+      security: []
+  "/api/queue/v1/event/{eventId}/{queueToken}":
+    get:
+      summary: Cek posisi antrian (saat refresh)
+      deprecated: false
+      description: Posisi antrian + ETA, atau Access Token bila giliran tiba. userJWT opsional. (FR-06, FR-10, Req 19)
+      operationId: getQueuePosition
+      tags:
+      - Waiting Room
+      parameters:
+      - name: eventId
+        in: path
+        description: ID event (UUID)
+        required: true
+        example: '018f2c1a-0000-7000-8000-0000000000a1'
+        schema:
+          type: string
+          format: uuid
+      - name: queueToken
+        in: path
+        description: Token antrian
+        required: true
+        example: q_01a19b68-036e-774b-bea8-7f89905f1133
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Posisi antrian atau status admitted
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/QueuePositionResponse"
+              examples:
+                queued:
+                  summary: queued
+                  value:
+                    status: '00000'
+                    message: OK
+                    data:
+                      status: QUEUED
+                      position: 870
+                      etaSeconds: 300
+                admitted:
+                  summary: admitted
+                  value:
+                    status: '00000'
+                    message: OK
+                    data:
+                      status: ADMITTED
+                      accessToken: acc_xyz
+                      bookingExpiresAt: '2026-11-01T10:05:00Z'
+          headers: {}
+      security: []
+  "/api/queue/v1/event/{eventId}/{queueToken}/stream":
+    get:
+      summary: Posisi antrian realtime (SSE)
+      deprecated: false
+      description: |
+        **Server-Sent Events (text/event-stream).** Push posisi + ETA realtime. userJWT opsional. (FR-07, FR-08, FR-10a, Req 19)
+
+        Event:
+        ```
+        event: position data: {"position": 310, "etaSeconds": 420}
+        event: admitted data: {"accessToken":"acc_xyz","bookingExpiresAt":"2026-11-01T10:05:00Z"}
+        event: sold_out data: {"message":"Tiket sudah habis. Antrian ditutup."}
+        ```
+      operationId: streamQueuePosition
+      tags:
+      - Waiting Room
+      parameters:
+      - name: eventId
+        in: path
+        description: ID event (UUID)
+        required: true
+        example: ''
+        schema:
+          type: string
+          format: uuid
+      - name: queueToken
+        in: path
+        description: Token antrian
+        required: true
+        example: ''
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Stream SSE (bukan envelope — text/event-stream)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: |+
+                  event: position
+                  data: {"position":310,"etaSeconds":420}
+
+          headers: {}
+      security: []
+  "/api/event/v1/detail/{eventId}":
+    get:
+      summary: Detail event + kategori
+      deprecated: false
+      description: Detail event + kategori (snapshot available awal; update realtime via SSE). userJWT opsional + Access Token. (FR-11, FR-12)
+      operationId: getEventDetail
+      tags:
+      - Detail Ticket Page
+      parameters:
+      - name: eventId
+        in: path
+        description: ID event (UUID)
+        required: true
+        example: '018f2c1a-0000-7000-8000-0000000000a1'
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Detail event
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/EventDetail"
+              example:
+                status: '00000'
+                message: OK
+                data:
+                  id: '018f2c1a-0000-7000-8000-0000000000a1'
+                  name: Konser A
+                  categories:
+                  - id: cat1
+                    name: VIP
+                    price: 1500000
+                    available: 40
+                  - id: cat2
+                    name: Reguler
+                    price: 500000
+                    available: 0
+          headers: {}
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+          description: Token tidak ada / tidak sah
+      security:
+      - accessToken: []
+  "/api/booking/v1/event/{eventId}/stock/stream":
+    get:
+      summary: Stok realtime (SSE)
+      deprecated: false
+      description: |
+        **Server-Sent Events (text/event-stream).** Push `available` per kategori realtime. Filter kategori opsional via query `?categoryIds=cat1,cat2`. userJWT opsional + Access Token. (FR-12a, NFR-06a)
+
+        ```
+        event: stock data: {"eventId":"...","categoryId":"cat1","available":37}
+        ```
+      operationId: streamStock
+      tags:
+      - Detail Ticket Page
+      parameters:
+      - name: eventId
+        in: path
+        description: ID event (UUID)
+        required: true
+        example: ''
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Stream SSE stok (bukan envelope — text/event-stream)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: |+
+                  event: stock
+                  data: {"categoryId":"cat1","available":37}
+
+          headers: {}
+      security:
+      - accessToken: []
+  "/api/booking/v1/create":
+    post:
+      summary: Buat booking (hold stok saat submit)
+      deprecated: false
+      description: 'Validasi email + tiap attendee (format + pencocokan {nik,nama,tglLahir,namaIbu} ke Dukcapil, tanpa OTP), kuota per-NIK, lalu HOLD stok atomic. 1 tiket = 1 NIK; total attendees ≤ 3. userJWT **opsional** (guest) + Access Token. (FR-13..16, Req 4, 5, 23)
+
+'
+      operationId: createBooking
+      tags:
+      - Detail Ticket Page
+      requestBody:
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/CreateBookingRequest"
+            example:
+              eventId: '018f2c1a-0000-7000-8000-0000000000a1'
+              email: user@example.com
+              items:
+              - categoryId: 01a19b65-922c-735c-b5d8-86eaf6bd3656
+                attendees:
+                - nik: '3273000000000002'
+                  nama: Ani Lestari
+                  tglLahir: '1992-05-17'
+                  namaIbu: Rina Marlina
+        required: true
+      responses:
+        '200':
+          description: Booking berhasil dibuat (HELD)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  message:
+                    type: string
+                  data:
+                    type: object
+                    properties:
+                      bookingId:
+                        type: string
+                      status:
+                        type: string
+                      total:
+                        type: integer
+                      paymentToken:
+                        type: string
+                      paymentExpiresAt:
+                        type: string
+                    required:
+                    - bookingId
+                    - status
+                    - total
+                    - paymentToken
+                    - paymentExpiresAt
+                required:
+                - status
+                - message
+                - data
+              example:
+                status: '00000'
+                message: Booking dibuat
+                data:
+                  bookingId: '018f2c1a-0000-7000-8000-0000000000b1'
+                  status: HELD
+                  total: 3000000
+                  paymentToken: eyJhbGciOi...
+                  paymentExpiresAt: '2026-11-01T10:15:00Z'
+          headers: {}
+        '400':
+          description: 'Validasi gagal (internal: NIK_INVALID / MAX_3_EXCEEDED / QUOTA_EXCEEDED)'
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Envelope"
+              example:
+                status: '409'
+                message: NIK sudah mencapai 3 tiket untuk event ini
+                data: {}
+          headers: {}
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+          description: Token tidak ada / tidak sah
+        '409':
+          description: 'Stok tidak cukup / kalah race (internal: OUT_OF_STOCK)'
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Envelope"
+              example:
+                status: '409'
+                message: Stok tidak mencukupi
+                data: {}
+          headers: {}
+      security:
+      - accessToken: []
+        userJWT: []
+      - accessToken: []
+  "/api/booking/v1/{bookingId}":
+    get:
+      summary: Status booking + sisa TTL + backDisabled
+      deprecated: false
+      description: Status booking, sisa TTL (detik), dan flag disable-back (sisa TTL pilih tiket < 30s). (FR-19, FR-26, Req 18)
+      operationId: getBooking
+      tags:
+      - Detail Ticket Page
+      parameters:
+      - name: bookingId
+        in: path
+        description: ID booking (UUID)
+        required: true
+        example: 420c3c0b-6bf5-4786-870e-ed80310ffa56
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Status booking
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/BookingStatusResponse"
+              example:
+                status: '00000'
+                message: OK
+                data:
+                  bookingId: '018f2c1a-0000-7000-8000-0000000000b1'
+                  status: HELD
+                  remainingSeconds: 540
+                  backDisabled: false
+          headers: {}
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+          description: Token tidak ada / tidak sah
+        '404':
+          "$ref": "#/components/responses/NotFound"
+          description: Resource tidak ditemukan
+      security:
+      - paymentToken: []
+  "/api/payment/v1/booking/{bookingId}":
+    get:
+      summary: Detail pembayaran (web & WebView mobile)
+      deprecated: false
+      description: 'Detail payment page. `methods[].enabled` dihitung dinamis: false bila `remainingSeconds < estSeconds` (Req 7.5). `snapToken` untuk Midtrans Snap. (FR-21, FR-24, FR-27, Req 8.2)
+
+'
+      operationId: getBookingPayment
+      tags:
+      - Payment Page
+      parameters:
+      - name: bookingId
+        in: path
+        description: ID booking (UUID)
+        required: true
+        example: ''
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Detail pembayaran
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  message:
+                    type: string
+                  data:
+                    type: object
+                    properties:
+                      bookingId:
+                        type: string
+                      total:
+                        type: integer
+                      snapToken:
+                        type: string
+                      redirectUrl:
+                        type: string
+                      remainingSeconds:
+                        type: integer
+                      status:
+                        type: string
+                      backDisabled:
+                        type: boolean
+                    required:
+                    - bookingId
+                    - total
+                    - snapToken
+                    - redirectUrl
+                    - remainingSeconds
+                    - status
+                    - backDisabled
+                required:
+                - status
+                - message
+                - data
+              example:
+                status: '00000'
+                message: OK
+                data:
+                  bookingId: cf78760d-9d2e-4589-9007-cfc6f7b628a2
+                  total: 750000
+                  snapToken: 9a7d6f4e-3b1c-4d2a-8e5f-1234567890ab
+                  redirectUrl: https://app.sandbox.midtrans.com/snap/v2/vtweb/9a7d6f4e-3b1c-4d2a-8e5f-1234567890ab
+                  remainingSeconds: 0
+                  status: PENDING
+                  backDisabled: true
+          headers: {}
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+          description: Token tidak ada / tidak sah
+      security:
+      - paymentToken: []
+  "/api/payment/v1/charge":
+    post:
+      summary: Mulai pembayaran via Midtrans
+      deprecated: false
+      description: 'Buat transaksi Midtrans (Snap/Core API). Idempoten via `idempotencyKey`. Ditolak bila sisa TTL tak cukup untuk metode (internal METHOD_TIME_INSUFFICIENT, Req 7.6). (FR-24)
+
+'
+      operationId: chargePayment
+      tags:
+      - Payment Page
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                bookingId:
+                  type: string
+              required:
+              - bookingId
+            example:
+              bookingId: 420c3c0b-6bf5-4786-870e-ed80310ffa56
+        required: true
+      responses:
+        '200':
+          description: Pembayaran dimulai
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/ChargeResponse"
+              examples:
+                snap:
+                  summary: snap
+                  value:
+                    status: '00000'
+                    message: Pembayaran dimulai
+                    data:
+                      paymentId: '018f2c1a-0000-7000-8000-0000000000c1'
+                      status: PENDING
+                      snapToken: 66e4fa55-fdac-4ef9-91b5-733b97d1b862
+                      redirectUrl: https://app.sandbox.midtrans.com/snap/v4/redirection/66e4fa55
+                coreApi:
+                  summary: coreApi
+                  value:
+                    status: '00000'
+                    message: Pembayaran dimulai
+                    data:
+                      paymentId: '018f2c1a-0000-7000-8000-0000000000c1'
+                      status: PENDING
+                      vaNumber: '8808123456789012'
+                      method: bca_va
+          headers: {}
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+          description: Token tidak ada / tidak sah
+        '409':
+          description: Metode tak cukup waktu (internal METHOD_TIME_INSUFFICIENT)
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Envelope"
+              example:
+                status: '409'
+                message: Sisa waktu tidak cukup untuk metode ini
+                data: {}
+          headers: {}
+      security:
+      - paymentToken: []
+  "/api/payment/v1/callback":
+    post:
+      summary: Webhook / HTTP notification Midtrans
+      deprecated: false
+      description: 'Dipanggil Midtrans (bukan klien). Idempoten + verifikasi `signature_key` = `sha512(order_id + status_code + gross_amount + ServerKey)`. Mapping: settlement/capture→SUCCESS, pending→PENDING, deny/cancel/expire→FAILED/EXPIRED. (FR-25, Req 8.3/8.4)
+
+'
+      operationId: paymentCallback
+      tags:
+      - Payment Page
+      requestBody:
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/MidtransNotification"
+            example:
+              order_id: booking-018f2c1a-0000-7000-8000-0000000000b1
+              transaction_status: settlement
+              status_code: '200'
+              gross_amount: '3000000.00'
+              payment_type: bank_transfer
+              signature_key: a1b2c3...sha512
+        required: true
+      responses:
+        '200':
+          description: Diterima (idempoten)
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      type: object
+                      properties:
+                        received:
+                          type: boolean
+                          example: true
+              example:
+                status: '00000'
+                message: OK
+                data:
+                  received: true
+          headers: {}
+        '400':
+          "$ref": "#/components/responses/BadRequest"
+          description: Request tidak valid
+        '401':
+          description: Signature tidak valid
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/Envelope"
+              example:
+                status: '401'
+                message: Signature tidak valid
+                data: {}
+          headers: {}
+      security: []
+  "/api/booking/v1/{bookingId}/cancel":
+    post:
+      summary: Cancel booking
+      deprecated: false
+      description: |-
+        User keluar total dari booking room dan harus antri ulang.
+
+        - `HELD` → `CANCELLED`, stok dikembalikan (atomik, `SELECT ... FOR UPDATE`).
+        - Boleh walau Payment Page/Snap sudah dibuka: payment `PENDING` ikut di-`EXPIRED` dan transaksi Midtrans di-expire (best-effort).
+        - Ditolak **409** bila sudah `PAID` (atau payment `SUCCESS`), **410** bila `EXPIRED`. Sudah `CANCELLED` → 200 tanpa efek (idempoten).
+        - Queue token dicabut: `POST /api/booking/v1/create` dengan Access Token lama → 410.
+        - `bookingId` di Payment Token harus sama dengan path, jika tidak 403.
+      tags: []
+      parameters:
+      - name: bookingId
+        in: path
+        description: ''
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {}
+          headers: {}
+      security:
+      - paymentToken: []
+  "/api/event/v1/admin/list-event":
+    get:
+      summary: Daftar event + oksupansi stok
+      deprecated: false
+      description: ''
+      operationId: adminListEvents
+      tags:
+      - Admin Page
+      parameters:
+      - name: page
+        in: query
+        description: Halaman (1-based). Default 1.
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          default: 1
+      - name: size
+        in: query
+        description: Jumlah item per halaman. Default 10, di-clamp maksimal 100.
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 10
+      responses:
+        '200':
+          description: Daftar event (admin)
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      type: array
+                      items:
+                        "$ref": "#/components/schemas/AdminEventListItem"
+                    meta:
+                      "$ref": "#/components/schemas/PageMeta"
+          headers: {}
+        '403':
+          "$ref": "#/components/responses/Forbidden"
+          description: Tidak punya hak akses (mis. butuh role admin)
+      security:
+      - userJWT: []
+  "/api/event/v1/admin/create-event":
+    post:
+      summary: Buat event
+      deprecated: false
+      description: Butuh JWT role=admin. (FR-E1, FR-E6)
+      operationId: adminCreateEvent
+      tags:
+      - Admin Page
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/AdminCreateEventRequest"
+            example:
+              name: Konser C
+              saleOpensAt: '2026-12-01T10:00:00Z'
+              status: draft
+        required: true
+      responses:
+        '200':
+          description: Event dibuat
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/AdminEventListItem"
+          headers: {}
+        '403':
+          "$ref": "#/components/responses/Forbidden"
+          description: Tidak punya hak akses (mis. butuh role admin)
+      security:
+      - userJWT: []
+  "/api/event/v1/admin/update-event/{eventId}":
+    put:
+      summary: Ubah event
+      deprecated: false
+      description: ''
+      operationId: adminUpdateEvent
+      tags:
+      - Admin Page
+      parameters:
+      - name: eventId
+        in: path
+        description: ID event (UUID)
+        required: true
+        example: ''
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/AdminUpdateEventRequest"
+        required: true
+      responses:
+        '200':
+          description: Event diperbarui
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/AdminEventListItem"
+          headers: {}
+        '403':
+          "$ref": "#/components/responses/Forbidden"
+          description: Tidak punya hak akses (mis. butuh role admin)
+        '404':
+          "$ref": "#/components/responses/NotFound"
+          description: Resource tidak ditemukan
+      security:
+      - userJWT: []
+  "/api/event/v1/admin/delete-event/{eventId}":
+    delete:
+      summary: Hapus / nonaktifkan event
+      deprecated: false
+      description: ''
+      operationId: adminDeleteEvent
+      tags:
+      - Admin Page
+      parameters:
+      - name: eventId
+        in: path
+        description: ID event (UUID)
+        required: true
+        example: ''
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: Event dihapus/dinonaktifkan
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      type: object
+                      properties:
+                        ok:
+                          type: boolean
+                          example: true
+          headers: {}
+        '403':
+          "$ref": "#/components/responses/Forbidden"
+          description: Tidak punya hak akses (mis. butuh role admin)
+        '404':
+          "$ref": "#/components/responses/NotFound"
+          description: Resource tidak ditemukan
+      security:
+      - userJWT: []
+  "/api/event/v1/admin/{eventId}/create-category":
+    post:
+      summary: Tambah kategori tiket
+      deprecated: false
+      description: "`available` diinisialisasi = `capacity`. (FR-E2)"
+      operationId: adminCreateCategory
+      tags:
+      - Admin Page
+      parameters:
+      - name: eventId
+        in: path
+        description: ID event (UUID)
+        required: true
+        example: ''
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/AdminCreateCategoryRequest"
+            example:
+              name: VIP
+              price: 1500000
+              capacity: 100
+        required: true
+      responses:
+        '200':
+          description: Kategori dibuat
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/Category"
+          headers: {}
+        '403':
+          "$ref": "#/components/responses/Forbidden"
+          description: Tidak punya hak akses (mis. butuh role admin)
+      security:
+      - userJWT: []
+  "/api/user/v1/nik/verify":
+    post:
+      summary: "[MOCK] Validasi NIK (pencocokan data)"
+      deprecated: false
+      description: 'Mock Dukcapil — `valid:true` hanya bila keempat field `{nik, nama, tglLahir, namaIbu}` cocok dengan satu record tersimpan. Tanpa OTP. (Req 17)
+
+'
+      operationId: dukcapilVerify
+      tags:
+      - Internal
+      requestBody:
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/DukcapilVerifyRequest"
+            example:
+              nik: '3273000000000001'
+              nama: Budi
+              tglLahir: '1990-01-01'
+              namaIbu: Siti
+        required: true
+      responses:
+        '200':
+          description: Hasil validasi
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/DukcapilVerifyResult"
+              example:
+                status: '00000'
+                message: OK
+                data:
+                  valid: true
+          headers: {}
+      security: []
+  "/api/event/v1/admin/update-category/{categoryId}":
+    put:
+      summary: Ubah kategori
+      deprecated: false
+      description: "`capacity` baru tidak boleh membuat `available < 0`. (FR-E2, FR-E5)"
+      operationId: adminUpdateCategory
+      tags:
+      - Admin Page
+      parameters:
+      - name: categoryId
+        in: path
+        description: ''
+        required: true
+        example: ''
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/AdminUpdateCategoryRequest"
+            example:
+              name: VIP
+              price: 1750000
+              capacity: 120
+        required: true
+      responses:
+        '200':
+          description: Kategori diperbarui
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/Category"
+          headers: {}
+        '400':
+          "$ref": "#/components/responses/BadRequest"
+          description: Request tidak valid
+        '403':
+          "$ref": "#/components/responses/Forbidden"
+          description: Tidak punya hak akses (mis. butuh role admin)
+      security:
+      - userJWT: []
+components:
+  schemas:
+    Envelope:
+      type: object
+      required:
+      - status
+      - message
+      - data
+      properties:
+        status:
+          type: string
+          description: '"00000" = sukses; selain itu string kode HTTP'
+          example: '00000'
+        message:
+          type: string
+        data:
+          description: Payload saat sukses; {} saat gagal
+        partial:
+          type: boolean
+          description: true bila sebagian upstream gagal namun data tetap berguna
+        meta:
+          "$ref": "#/components/schemas/PageMeta"
+          description: Info pagination pada endpoint list (opsional)
+    PageMeta:
+      type: object
+      required:
+      - page
+      - size
+      - totalItems
+      - totalPages
+      properties:
+        page:
+          type: integer
+          description: Halaman saat ini (1-based)
+          example: 1
+        size:
+          type: integer
+          description: Jumlah item per halaman
+          example: 10
+        totalItems:
+          type: integer
+          description: Total seluruh item lintas halaman
+          example: 42
+        totalPages:
+          type: integer
+          description: Total halaman = ceil(totalItems/size)
+          example: 5
+    RegisterRequest:
+      type: object
+      required:
+      - email
+      - password
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        name:
+          type: string
+    RegisterResponse:
+      type: object
+      properties:
+        userId:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum:
+          - customer
+          - admin
+    LoginRequest:
+      type: object
+      required:
+      - email
+      - password
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+    LoginResponse:
+      type: object
+      properties:
+        authToken:
+          type: string
+          description: JWT login (bukan Access Token antrian)
+        refreshToken:
+          type: string
+          description: JWT
+        role:
+          type: string
+          enum:
+          - customer
+          - admin
+        expiresIn:
+          type: integer
+          description: detik
+    MeResponse:
+      type: object
+      properties:
+        userId:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum:
+          - customer
+          - admin
+    Member:
+      type: object
+      properties:
+        memberId:
+          type: string
+        nik:
+          type: string
+          description: 16 digit
+        nama:
+          type: string
+    MemberRequest:
+      type: object
+      required:
+      - nik
+      - nama
+      - tglLahir
+      - namaIbu
+      properties:
+        nik:
+          type: string
+          description: 16 digit
+        nama:
+          type: string
+        tglLahir:
+          type: string
+          format: date
+        namaIbu:
+          type: string
+          description: nama ibu kandung
+    DukcapilVerifyRequest:
+      type: object
+      required:
+      - nik
+      - nama
+      - tglLahir
+      - namaIbu
+      properties:
+        nik:
+          type: string
+          description: 16 digit
+        nama:
+          type: string
+        tglLahir:
+          type: string
+          format: date
+        namaIbu:
+          type: string
+    DukcapilVerifyResult:
+      type: object
+      properties:
+        valid:
+          type: boolean
+          description: true hanya bila keempat field cocok
+    TicketHistory:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              bookingId:
+                type: string
+                format: uuid
+              eventName:
+                type: string
+              status:
+                type: string
+                enum:
+                - HELD
+                - PAID
+                - EXPIRED
+                - CANCELLED
+              tickets:
+                type: integer
+              total:
+                type: integer
+              createdAt:
+                type: string
+                format: date-time
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        total:
+          type: integer
+    EventListItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+          enum:
+          - available
+          - sold_out
+        saleOpensAt:
+          type: string
+          format: date-time
+    Category:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        price:
+          type: integer
+        available:
+          type: integer
+        capacity:
+          type: integer
+    EventDetail:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        categories:
+          type: array
+          items:
+            "$ref": "#/components/schemas/Category"
+    AdminEventListItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+          enum:
+          - draft
+          - on_sale
+          - sold_out
+          - closed
+        categories:
+          type: array
+          items:
+            "$ref": "#/components/schemas/Category"
+    AdminCreateEventRequest:
+      type: object
+      required:
+      - name
+      properties:
+        name:
+          type: string
+        saleOpensAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum:
+          - draft
+          - on_sale
+          - closed
+    AdminUpdateEventRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        saleOpensAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum:
+          - draft
+          - on_sale
+          - sold_out
+          - closed
+    AdminCreateCategoryRequest:
+      type: object
+      required:
+      - name
+      - price
+      - capacity
+      properties:
+        name:
+          type: string
+        price:
+          type: integer
+        capacity:
+          type: integer
+    AdminUpdateCategoryRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        price:
+          type: integer
+        capacity:
+          type: integer
+    QueueEnqueueResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum:
+          - QUEUED
+          - ADMITTED
+        queueToken:
+          type: string
+        position:
+          type: integer
+          nullable: true
+        etaSeconds:
+          type: integer
+          description: estimasi tunggu (Req 19)
+          nullable: true
+        accessToken:
+          type: string
+          nullable: true
+        bookingExpiresAt:
+          type: string
+          format: date-time
+          nullable: true
+    QueuePositionResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum:
+          - QUEUED
+          - ADMITTED
+        position:
+          type: integer
+          nullable: true
+        etaSeconds:
+          type: integer
+          nullable: true
+        accessToken:
+          type: string
+          nullable: true
+        bookingExpiresAt:
+          type: string
+          format: date-time
+          nullable: true
+    CreateBookingRequest:
+      type: object
+      required:
+      - eventId
+      - email
+      - items
+      description: 1 tiket = 1 NIK; total attendees ≤ 3; email wajib. Tiap attendee {nik,nama,tglLahir,namaIbu} dicocokkan ke Dukcapil (tanpa OTP).
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        items:
+          type: array
+          items:
+            type: object
+            required:
+            - categoryId
+            - attendees
+            properties:
+              categoryId:
+                type: string
+              attendees:
+                type: array
+                items:
+                  type: object
+                  required:
+                  - nik
+                  - nama
+                  - tglLahir
+                  - namaIbu
+                  properties:
+                    nik:
+                      type: string
+                      description: 16 digit
+                    nama:
+                      type: string
+                    tglLahir:
+                      type: string
+                      format: date
+                    namaIbu:
+                      type: string
+                      description: nama ibu kandung
+    BookingStatusResponse:
+      type: object
+      properties:
+        bookingId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+          - HELD
+          - PAID
+          - EXPIRED
+          - CANCELLED
+        remainingSeconds:
+          type: integer
+        backDisabled:
+          type: boolean
+          description: true bila sisa TTL pilih tiket < 30s (Req 18)
+    ChargeResponse:
+      type: object
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+          - PENDING
+          - SUCCESS
+          - FAILED
+        snapToken:
+          type: string
+          nullable: true
+        redirectUrl:
+          type: string
+          nullable: true
+        vaNumber:
+          type: string
+          nullable: true
+        method:
+          type: string
+          nullable: true
+    MidtransNotification:
+      type: object
+      properties:
+        order_id:
+          type: string
+        transaction_status:
+          type: string
+        status_code:
+          type: string
+        gross_amount:
+          type: string
+        payment_type:
+          type: string
+        signature_key:
+          type: string
+  responses:
+    BadRequest:
+      description: Request tidak valid
+      content:
+        application/json:
+          schema:
+            "$ref": "#/components/schemas/Envelope"
+          examples:
+            Success:
+              summary: Success
+              value:
+                status: '400'
+                message: Request tidak valid
+                data: {}
+    Unauthorized:
+      description: Token tidak ada / tidak sah
+      content:
+        application/json:
+          schema:
+            "$ref": "#/components/schemas/Envelope"
+          examples:
+            Success:
+              summary: Success
+              value:
+                status: '401'
+                message: Token tidak valid
+                data: {}
+    Forbidden:
+      description: Tidak punya hak akses (mis. butuh role admin)
+      content:
+        application/json:
+          schema:
+            "$ref": "#/components/schemas/Envelope"
+          examples:
+            Success:
+              summary: Success
+              value:
+                status: '403'
+                message: Akses ditolak
+                data: {}
+    NotFound:
+      description: Resource tidak ditemukan
+      content:
+        application/json:
+          schema:
+            "$ref": "#/components/schemas/Envelope"
+          examples:
+            Success:
+              summary: Success
+              value:
+                status: '404'
+                message: Tidak ditemukan
+                data: {}
+    Conflict:
+      description: Konflik (mis. EMAIL_TAKEN)
+      content:
+        application/json:
+          schema:
+            "$ref": "#/components/schemas/Envelope"
+          examples:
+            Success:
+              summary: Success
+              value:
+                status: '409'
+                message: Email sudah terdaftar
+                data: {}
+  securitySchemes:
+    userJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Token login dari POST /auth/login (data.authToken). Opsional di journey beli; wajib untuk member, riwayat, admin.
+    accessToken:
+      type: apiKey
+      in: header
+      name: X-Access-Token
+      description: Access Token antrian dari queue-service (saat status ADMITTED). Berlaku ~5 menit (TTL booking).
+    paymentToken:
+      type: apiKey
+      in: header
+      name: X-Payment-Token
+      description: Payment Token dari POST /api/booking/v1/create (data.paymentToken). Berlaku sampai paymentExpiresAt (10 menit).
+servers:
+- url: https://rusuh-gateway-stream-381331776726.asia-northeast1.gateway.dev
+  description: Production (API Gateway, streaming/SSE aktif). Wajib https://
+- url: http://localhost:{port}
+  description: Lokal (tiap service port sendiri, lihat LOCAL-SETUP.md)
+  variables:
+    port:
+      default: '8081'
+      enum:
+      - '8081'
+      - '8082'
+      - '8083'
+      - '8084'
+      - '8085'
+      - '8086'
+      description: 8081 booking, 8082 event, 8083 payment, 8084 queue, 8085 dukcapil-mock, 8086 user
+security: []
