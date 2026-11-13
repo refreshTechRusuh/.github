@@ -192,14 +192,22 @@ dan `payment:redirect:{bookingId}` di Redis (TTL = sisa waktu).
 | Route | Auth |
 |---|---|
 | `POST /auth/register`, `POST /auth/login` | — (rate limit) |
-| `POST /auth/logout` | `refreshToken` opsional (dicabut via `revoked:refresh:*`) |
+| `POST /auth/refresh` | — (kredensial = `refreshToken` di body; rate limit per IP). Menerbitkan `authToken` + `refreshToken` baru |
+| `POST /auth/logout` | JWT (`authToken`); mencabut sesi (`sid`) |
 | `GET /auth/me` | JWT |
 | `POST /api/user/v1/nik/verify` | — (rate limit per IP & per NIK; 503 bila Dukcapil mati) |
 | `GET/POST/PUT/DELETE /api/user/v1/member/...` | JWT; data NIK dicocokkan ke Dukcapil (fail-closed) |
 | `GET /api/user/v1/ticket-history` | JWT |
 | `POST /api/dukcapil/v1/verify` (dukcapil-mock) | — (mock pihak eksternal; tanpa auth, tidak dipasang di gateway) |
 
-Login JWT (HS256, `USER_JWT_SECRET`): `{sub: userId, role}`; TTL default 1 jam; refresh token terpisah (`REFRESH_TOKEN_SECRET`).
+Login JWT (HS256, `USER_JWT_SECRET`): `{sub: userId, role, sid}`; TTL default 1 jam (`USER_JWT_TTL_SECONDS`). Refresh token terpisah (`REFRESH_TOKEN_SECRET`, `{sub, sid}`, default 7 hari).
+
+**Sesi login, logout, dan refresh.** Setiap login membuat `sid` baru yang dibawa `authToken` dan `refreshToken`.
+- `POST /auth/logout` (wajib `authToken`) memasukkan `sid` ke denylist Redis (`revoked:refresh:sid:{sid}`) selama TTL refresh token. `authToken` dan `refreshToken` sesi itu langsung ditolak; sesi lain tidak terpengaruh.
+- Middleware `RequireAuth`/`RequireRole` user-service mengecek denylist di tiap request. Bila Redis error, pengecekan dilewati (fail-open, dicatat di log) agar gangguan Redis tidak mematikan semua endpoint ber-login.
+- `POST /auth/refresh` memverifikasi refresh token, memastikan sesinya belum logout dan tokennya belum pernah dipakai, membaca ulang user (role) dari database, menandai refresh token lama terpakai (`revoked:refresh:{token}`), lalu menerbitkan pasangan token baru dengan `sid` yang sama.
+- Token yang diterbitkan sebelum fitur ini tidak punya `sid`: tetap berlaku sampai kedaluwarsa dan tidak bisa dicabut per sesi. Refresh token lama tanpa `sid` memulai sesi baru saat di-refresh.
+- Alur FE: simpan kedua token; saat API membalas 401 untuk `authToken`, panggil refresh dengan `refreshToken`, ganti **kedua** token, lalu ulangi request. Bila refresh 401, minta login ulang.
 Akun admin dibuat sekali saat start dari `ADMIN_EMAIL` + `ADMIN_PASSWORD`.
 Dukcapil mencocokkan 4 field tanpa membedakan huruf besar/kecil (`strings.EqualFold` + `TrimSpace`).
 
@@ -305,6 +313,7 @@ Dicatat di sini agar dokumentasi sesuai perilaku kode.
 | Access Token | Tidak dikonsumsi sekali pakai dan tidak memuat NIK | Dalam 5 menit satu token dapat membuat lebih dari satu booking. Dibatasi kuota NIK dan stok |
 | Antrian per NIK | Join antrian tanpa NIK (lihat PRD §11) | `QUEUE_CAP` dan rate limit per IP adalah lapis pelindung |
 | Rate limit per IP | Memakai nilai pertama `X-Forwarded-For` | Dapat dipalsukan; limit per email dan per NIK tetap berlaku |
+| Cakupan pencabutan token login | Denylist sesi hanya dicek oleh endpoint user-service. event-service (admin), booking-service, dan payment-service memverifikasi tanda tangan + `exp` saja | `authToken` sesi yang sudah logout masih diterima service lain sampai `exp` (default 1 jam). Booking hanya menautkan `user_id`; endpoint admin event-service tetap menerima token itu sampai kedaluwarsa |
 | Endpoint antar-service | `POST /internal/event/v1/{eventId}/sold-out` tanpa auth dan tidak memeriksa stok | Tidak ada di gateway; hanya terjangkau lewat URL Cloud Run langsung |
 | JWT | Parser menerima keluarga HS256/384/512 dan tidak mewajibkan `exp`/`iss`. Default secret hanya ditolak bila `APP_ENV=production` | Secret production diinjeksi dari Secret Manager |
 | Log payload Midtrans | Respons Snap (termasuk `token`, `redirect_url`) dan email dicatat di level INFO | Batasi akses Cloud Logging |

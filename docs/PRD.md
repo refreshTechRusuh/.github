@@ -153,7 +153,8 @@ Masalah inti **bukan fitur fungsional biasa**, melainkan **menangani lonjakan tr
 | FR-A6 | User (login) dapat **CRUD daftar NIK/member** (mis. NIK keluarga) untuk dipilih saat membeli | SHOULD |
 | FR-A7 | NIK divalidasi ke **mock Dukcapil service** (bukan hanya format 16 digit) saat dipakai/ditambahkan | SHOULD |
 | FR-16 | NIK divalidasi via **pencocokan data** (`nik+nama+tgl lahir+nama ibu kandung`) ke Dukcapil mock saat tambah member & saat booking — data penonton tepercaya (tanpa OTP) | SHOULD |
-| FR-A8 | User/admin dapat **logout** (revoke refresh token) | SHOULD |
+| FR-A8 | User/admin dapat **logout** (mencabut sesi login: `authToken` + `refreshToken`) | SHOULD |
+| FR-A10 | Klien dapat memperbarui sesi lewat **refresh token** (`POST /auth/refresh`) tanpa login ulang selama refresh token berlaku (default 7 hari); refresh token sekali pakai | SHOULD |
 | FR-A9 | User (login) dapat melihat **riwayat tiket/booking** miliknya | SHOULD |
 
 ### 7.0b Manajemen Event oleh Admin (Event Service)

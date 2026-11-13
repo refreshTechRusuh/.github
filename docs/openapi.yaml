@@ -140,9 +140,14 @@ paths:
       security: []
   "/auth/logout":
     post:
-      summary: Logout (revoke refresh token)
+      summary: Logout (cabut sesi login)
       deprecated: false
-      description: Akhiri sesi, cabut refresh token. Idempoten. Butuh userJWT. (FR-A8, Req 20)
+      description: |-
+        Akhiri sesi login. Tanpa body: sesi diambil dari klaim `sid` di authToken (`Authorization: Bearer`).
+        - Mencabut **authToken dan refreshToken** sesi itu (denylist Redis selama umur refreshToken). Sesi login lain milik user yang sama tidak terpengaruh.
+        - Setelah logout, `refreshToken` sesi itu ditolak di `POST /auth/refresh` (401).
+        - Idempoten untuk token lama tanpa `sid` (tidak ada yang dicabut, tetap 200). Token yang sudah dicabut/kedaluwarsa → 401.
+        - Pencabutan ditegakkan oleh endpoint user-service. Service lain (event, booking, payment) hanya memverifikasi tanda tangan dan masa berlaku JWT. (FR-A8)
       operationId: logout
       tags:
       - Login Page
@@ -174,6 +179,63 @@ paths:
           description: Token tidak ada / tidak sah
       security:
       - userJWT: []
+  "/auth/refresh":
+    post:
+      summary: Perbarui token (refresh)
+      deprecated: false
+      description: |-
+        Tukar `refreshToken` dengan `authToken` + `refreshToken` baru dalam sesi login yang sama. Dipanggil FE saat `authToken` kedaluwarsa (401) atau menjelang kedaluwarsa (`expiresIn`).
+        - **Tanpa header Authorization** — kredensialnya `refreshToken` di body.
+        - `refreshToken` bersifat **sekali pakai**: setelah dipakai, token lama ditolak. FE wajib mengganti kedua token yang tersimpan.
+        - `role` dibaca ulang dari database, sehingga perubahan role berlaku di token baru.
+        - Ditolak 401 bila token rusak/kedaluwarsa, sudah dipakai, sesinya sudah logout, atau user sudah tidak ada (satu pesan yang sama untuk semua sebab).
+        - Rate limit per IP (batas yang sama dengan login).
+      operationId: refreshToken
+      tags:
+      - Login Page
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - refreshToken
+              properties:
+                refreshToken:
+                  type: string
+            example:
+              refreshToken: eyJhbGciOi...
+        required: true
+      responses:
+        '200':
+          description: Token diperbarui
+          content:
+            application/json:
+              schema:
+                allOf:
+                - "$ref": "#/components/schemas/Envelope"
+                - type: object
+                  properties:
+                    data:
+                      "$ref": "#/components/schemas/LoginResponse"
+              example:
+                status: '00000'
+                message: token diperbarui
+                data:
+                  authToken: eyJhbGciOi...
+                  refreshToken: eyJhbGciOi...
+                  role: customer
+                  expiresIn: 3600
+          headers: {}
+        '400':
+          description: Body rusak atau refreshToken kosong
+        '401':
+          "$ref": "#/components/responses/Unauthorized"
+          description: Refresh token tidak valid
+        '429':
+          description: Terlalu banyak percobaan
+      security: []
   "/auth/me":
     get:
       summary: Profil user dari token
@@ -1622,10 +1684,10 @@ components:
       properties:
         authToken:
           type: string
-          description: JWT login (bukan Access Token antrian)
+          description: JWT login (bukan Access Token antrian). Membawa klaim `sid` (id sesi).
         refreshToken:
           type: string
-          description: JWT
+          description: JWT berumur panjang (default 7 hari), sekali pakai di `POST /auth/refresh`.
         role:
           type: string
           enum:

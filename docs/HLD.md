@@ -165,7 +165,7 @@ Alur alternatif (cancel, TTL booking habis, TTL bayar habis, sold out, mobile We
 ### 5.4 Token & identitas
 | Token | Penerbit | Dipakai untuk | Header |
 |---|---|---|---|
-| Login JWT (opsional) | user-service | Member, riwayat, admin; menautkan `user_id` ke booking | `Authorization: Bearer` |
+| Login JWT (opsional) | user-service | Member, riwayat, admin; menautkan `user_id` ke booking. Berumur 1 jam, diperbarui lewat refresh token (7 hari) | `Authorization: Bearer` |
 | Access Token | queue-service | Detail event, stok SSE, buat booking | `X-Access-Token` |
 | Payment Token | booking-service | Status booking, charge, detail bayar, cancel | `X-Payment-Token` |
 
@@ -210,7 +210,7 @@ Selama masih ada hold yang bisa kedaluwarsa, antrian **tidak** ditutup (stok mas
 - HTTPS di gateway & Cloud Run; data VM tanpa IP publik, port hanya terbuka dari VPC connector.
 - Middleware tiap service: security headers (HSTS, nosniff, CSP `default-src 'none'`, `Cache-Control: no-store`), CORS, batas body 1 MB, transaction ID.
 - Rate limit: login & register per IP/email, verifikasi NIK per IP/NIK, join antrian per IP.
-- Password bcrypt; refresh token bisa dicabut (denylist Redis); secret lewat Secret Manager, tidak ada di repo.
+- Password bcrypt; logout mencabut sesi login (`authToken` + `refreshToken`) lewat denylist Redis, dan `POST /auth/refresh` menukar refresh token sekali pakai dengan pasangan token baru; secret lewat Secret Manager, tidak ada di repo.
 - Query SQL selalu parameterized.
 - Daftar batasan keamanan dan keandalan yang diketahui: [LLD §7](LLD.md#7-batasan-yang-diketahui).
 
